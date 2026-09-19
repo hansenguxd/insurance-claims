@@ -1,20 +1,12 @@
 # insurance-claims-rag
 
-Remove-Item -Recurse -Force .git
+AI Agent function tools call:
 
-git init
-git add .
-git commit -m "Initial commit"
+        auto_claim_tool = FunctionTool(
+            name="auto_claim_query",
 
-git branch -M main
-git remote add origin https://github.com/hansenguxd/insurance_claims.git
-git push -u origin main
-
-## check the changes:
-git status
-git remote -v
-
-##for update one file
-git add agent.py
-git commit -m "Update agent.py"
-git push origin main
+        auto_claim_detail_tool = FunctionTool(
+            name="auto_claim_detail_query",
+        
+        auto_claim_risk_tool = FunctionTool(
+            name="auto_claim_risk_check",
