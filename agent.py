@@ -8,7 +8,7 @@ from azure.ai.projects.models import FunctionTool
 from azure.identity import DefaultAzureCredential
 from azure.ai.projects.models import PromptAgentDefinition, FunctionTool
 from openai.types.responses.response_input_param import FunctionCallOutput, ResponseInputParam
-from functions_auto_claim import auto_claim_query, auto_claim_detail_query
+from functions_auto_claim import auto_claim_query, auto_claim_detail_query, auto_claim_risk_check
 
 # Safety cap on how many tool-call rounds the model may chain in a single user turn
 # (e.g. auto_claim_query -> auto_claim_detail_query -> ...).
@@ -85,6 +85,25 @@ def main():
             strict=True,
         )
 
+        # Define the auto-claim risk check function tool (Azure SQL Server)
+        auto_claim_risk_tool = FunctionTool(
+            name="auto_claim_risk_check",
+            description="Perform an anomaly/risk check on the claims of the given customers. For each CustomerID it uses the customer's CLOSED claims as the baseline to compute the mean and standard deviation, then compares the customer's OPEN claims against it and flags the OPEN claim records whose ClaimAmount is GREATER than mean + 2*standard deviation (potential abnormal/fraudulent claims). Takes the list of CustomerIDs (e.g. the ones returned by auto_claim_query) and returns, per customer, the closed/open claim counts, mean, std, threshold and the flagged OPEN claim records. Use when the user asks for a risk/outlier check on open claims, abnormal or unusual claim amounts, or open claims above the customer's closed-claim mean plus 2 standard deviations.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "customer_ids": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "the list of CustomerIDs to run the risk check for (e.g. [1, 2])",
+                    },
+                },
+                "required": ["customer_ids"],
+                "additionalProperties": False,
+            },
+            strict=True,
+        )
+
         # Create a new agent with the function tools
         agent = project_client.agents.create_version(
             agent_name="auto-claim-agent",
@@ -99,10 +118,11 @@ def main():
 
                     TOOL SELECTION GUIDE:
                     - auto_claim_query: Query customers with total claims over a threshold. Pass the EXACT amount from the user's question as threshold (e.g. 'greater than 20000' → 20000). NEVER change or round the user's number; use 10000 only if no amount is mentioned.
-                    - auto_claim_detail_query: Use after auto_claim_query to get the policy/claim detail for the returned high-value customers (pass their customer_ids)""",
+                    - auto_claim_detail_query: Use after auto_claim_query to get the policy/claim detail for the returned high-value customers (pass their customer_ids)
+                    - auto_claim_risk_check: Use when the user asks for a risk/outlier check on open claims. Pass the customer_ids and it returns, per customer, the closed-claim baseline statistics (mean/std/threshold) plus the OPEN claim records whose ClaimAmount exceeds mean + 2*standard deviation of the closed claims.""",
                 tools=[
                     # only db tool registered
-                    auto_claim_tool, auto_claim_detail_tool,
+                    auto_claim_tool, auto_claim_detail_tool, auto_claim_risk_tool,
                 ],
             ),
         )        
@@ -158,6 +178,8 @@ def main():
                         result = json.dumps(auto_claim_query(**args))
                     elif function_name == "auto_claim_detail_query":
                         result = json.dumps(auto_claim_detail_query(**args))
+                    elif function_name == "auto_claim_risk_check":
+                        result = json.dumps(auto_claim_risk_check(**args))
 
                     # Append the output text
                     tool_outputs.append(

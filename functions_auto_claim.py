@@ -1,4 +1,5 @@
 import pyodbc
+import statistics
 from decimal import Decimal
 
 # Azure SQL Server connection parameters (auto-claim database)
@@ -59,6 +60,28 @@ ORDER BY
     c.CustomerID,
     p.PolicyID,
     cl.ClaimID;
+"""
+
+# {where_clause} is replaced with 'WHERE c.CustomerID IN (...)' when the
+# risk check is called with a list of customer IDs. Only rows with an actual
+# claim amount (NULLs filtered out) are returned. ClaimStatus is needed to
+# split the claims into the 'closed' baseline and 'open' comparison set.
+_AUTO_CLAIM_RISK_QUERY = """
+SELECT
+    c.CustomerID,
+    cl.ClaimNumber,
+    cl.ClaimStatus,
+    cl.ClaimAmount
+FROM dbo.Customer c
+LEFT JOIN dbo.Policy p
+    ON c.CustomerID = p.CustomerID
+LEFT JOIN dbo.Claim cl
+    ON p.PolicyID = cl.PolicyID
+{where_clause}
+    AND cl.ClaimAmount IS NOT NULL
+ORDER BY
+    c.CustomerID,
+    cl.ClaimNumber;
 """
 
 
@@ -184,3 +207,106 @@ def auto_claim_detail_query(customer_ids: list) -> dict:
         return {"status": "Error", "message": f"Database connection/query error: {str(e)}"}
     except Exception as e:
         return {"status": "Error", "message": f"Failed to query auto-claim detail: {str(e)}"}
+
+
+def auto_claim_risk_check(customer_ids: list) -> dict:
+    """
+    Perform an anomaly/risk check on the claims of the given customers.
+
+    For each CustomerID, all CLOSED claims of the customer are used as the
+    baseline to compute the mean and standard deviation of the claim amounts.
+    Then every OPEN claim of that customer is compared against the baseline:
+    an open claim whose ClaimAmount is GREATER than
+    threshold = mean + 2 * standard deviation is returned as a flagged claim
+    (potential abnormal/fraudulent claim).
+
+    Args:
+        customer_ids: List of CustomerIDs to check, e.g. [1, 2].
+
+    Returns:
+        dict: Always a dict. On success it contains 'status', 'count' and a
+        'results' list with one entry per requested customer. Each entry holds
+        the customer's ClosedClaimCount, OpenClaimCount, MeanClaimAmount and
+        StdClaimAmount (both computed from the CLOSED claims), Threshold
+        (mean + 2*std of the closed claims) and the 'FlaggedClaims' list of
+        OPEN claim records whose ClaimAmount exceeds that threshold. If a
+        customer has no closed claims, no baseline exists and nothing is
+        flagged. On error it contains 'status' and 'message'.
+    """
+    if not customer_ids:
+        return {"status": "Error", "message": "customer_ids must be a non-empty list of CustomerIDs."}
+
+    # Parameterized IN clause: one '?' placeholder per customer ID
+    placeholders = ", ".join("?" for _ in customer_ids)
+    query = _AUTO_CLAIM_RISK_QUERY.format(
+        where_clause=f"WHERE c.CustomerID IN ({placeholders})"
+    )
+
+    try:
+        with pyodbc.connect(_connection_string()) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(query, tuple(customer_ids))
+                claim_rows = _rows_to_dicts(cursor)
+    except pyodbc.Error as e:
+        return {"status": "Error", "message": f"Database connection/query error: {str(e)}"}
+    except Exception as e:
+        return {"status": "Error", "message": f"Failed to query auto-claim risk data: {str(e)}"}
+
+    # Group the fetched claim rows per customer
+    claims_by_customer: dict = {}
+    for row in claim_rows:
+        claims_by_customer.setdefault(row["CustomerID"], []).append(row)
+
+    results = []
+    for customer_id in customer_ids:
+        customer_claims = claims_by_customer.get(customer_id, [])
+        # Case-insensitive status matching: baseline = CLOSED, comparison = OPEN
+        # (the DB stores 'Closed'/'Open'; users may refer to them as lowercase)
+        closed_claims = [
+            row for row in customer_claims
+            if str(row["ClaimStatus"]).strip().lower() == "closed"
+        ]
+        open_claims = [
+            row for row in customer_claims
+            if str(row["ClaimStatus"]).strip().lower() == "open"
+        ]
+
+        closed_amounts = [row["ClaimAmount"] for row in closed_claims]
+        if closed_amounts:
+            mean = statistics.fmean(closed_amounts)
+            # Need at least 2 values for a meaningful standard deviation;
+            # with a single closed claim the std is treated as 0.
+            std = statistics.stdev(closed_amounts) if len(closed_amounts) > 1 else 0.0
+            threshold = mean + 2.0 * std
+        else:
+            # No closed claims -> no baseline exists, nothing can be flagged
+            mean = 0.0
+            std = 0.0
+            threshold = None
+
+        flagged_claims = []
+        if threshold is not None:
+            flagged_claims = [
+                {
+                    "ClaimNumber": row["ClaimNumber"],
+                    "ClaimStatus": row["ClaimStatus"],
+                    "ClaimAmount": row["ClaimAmount"],
+                }
+                for row in open_claims
+                if row["ClaimAmount"] > threshold
+            ]
+
+        results.append(
+            {
+                "CustomerID": customer_id,
+                "ClosedClaimCount": len(closed_claims),
+                "OpenClaimCount": len(open_claims),
+                "MeanClaimAmount": mean,
+                "StdClaimAmount": std,
+                "Threshold": threshold,
+                "FlaggedClaimCount": len(flagged_claims),
+                "FlaggedClaims": flagged_claims,
+            }
+        )
+
+    return {"status": "Success", "count": len(results), "results": results}
