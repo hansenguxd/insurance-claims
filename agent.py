@@ -47,22 +47,6 @@ def main():
         # Define the event function tool (local data)
  
         # Define the SQL event function tool (database)
-        sql_tool = FunctionTool(
-            name="db_next_visible_event",
-            description="Get the next visible astronomical event from the agent_sky_event PostgreSQL DATABASE table 'event'. Use when user explicitly asks for DATABASE or SQL query, or mentions 'agent_sky_event'.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "location": {
-                        "type": "string",
-                        "description": "location to find the next visible event in the database (e.g. 'north_america', 'south_america', 'australia')",
-                    },
-                },
-                "required": ["location"],
-                "additionalProperties": False,
-            },
-            strict=True,
-        )    
 
         # Define the auto-claim query function tool (Azure SQL Server)
         auto_claim_tool = FunctionTool(
@@ -118,7 +102,7 @@ def main():
                     - auto_claim_detail_query: Use after auto_claim_query to get the policy/claim detail for the returned high-value customers (pass their customer_ids)""",
                 tools=[
                     # only db tool registered
-                    sql_tool, auto_claim_tool, auto_claim_detail_tool,
+                    auto_claim_tool, auto_claim_detail_tool,
                 ],
             ),
         )        
